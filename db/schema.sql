@@ -229,3 +229,112 @@ JOIN structures   s  ON s.id  = dr.structure_id
 LEFT JOIN poses   p  ON p.run_id = dr.id
 LEFT JOIN scores  sc ON sc.pose_id = p.id
 GROUP BY dr.id;
+
+-- =============================================================================
+-- SCHEMA ADDITION: PLIP Interacting Residues
+-- Add this to schema.sql (or run as a migration on an existing DB)
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- 7. PLIP_CONTACTS
+--    One row per interaction identified by PLIP for a given pose.
+--    Extracted from the raw value_json in scores for ready-to-query use.
+--
+--    interaction_type values (PLIP vocabulary):
+--      'hydrophobic'   – hydrophobic contact
+--      'hbond'         – hydrogen bond
+--      'waterbridge'   – water-bridged H-bond
+--      'saltbridge'    – salt bridge
+--      'pistacking'    – π–π stacking          ← key for FG-NTR!
+--      'pication'      – π–cation interaction
+--      'halogen'       – halogen bond
+--      'metal'         – metal coordination
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS plip_contacts (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- What was scored
+    pose_id             INTEGER NOT NULL REFERENCES poses(id),
+    scored_file_id      INTEGER REFERENCES files(id),   -- the plip_ready PDB used
+
+    -- Receptor-side residue (NPC / NTR)
+    rec_chain           TEXT,
+    rec_resname         TEXT,           -- e.g. 'PHE', 'TYR', 'LYS'
+    rec_resid           INTEGER,        -- residue number in scored file
+    rec_resid_original  INTEGER,        -- residue number before renumbering
+    rec_atom            TEXT,           -- atom name if relevant (e.g. 'NZ')
+
+    -- Ligand-side residue (FG-NTR peptide)
+    lig_chain           TEXT,
+    lig_resname         TEXT,
+    lig_resid           INTEGER,
+    lig_resid_original  INTEGER,
+    lig_atom            TEXT,
+
+    -- Interaction geometry
+    interaction_type    TEXT    NOT NULL,
+    distance            REAL,           -- Å
+    angle               REAL,           -- degrees, where relevant
+    is_donor_rec        INTEGER,        -- 1/0 for hbond donor side
+    sidechain           INTEGER,        -- 1 = sidechain, 0 = backbone
+
+    -- Raw PLIP details (in case you need anything else later)
+    raw_json            TEXT,
+
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_plip_pose          ON plip_contacts(pose_id);
+CREATE INDEX IF NOT EXISTS idx_plip_type          ON plip_contacts(interaction_type);
+CREATE INDEX IF NOT EXISTS idx_plip_rec_resid     ON plip_contacts(rec_chain, rec_resid);
+CREATE INDEX IF NOT EXISTS idx_plip_lig_resid     ON plip_contacts(lig_chain, lig_resid);
+
+
+-- -----------------------------------------------------------------------------
+-- VIEW: v_plip_summary
+--    Per-pose contact counts by interaction type, ready for analysis.
+-- -----------------------------------------------------------------------------
+CREATE VIEW IF NOT EXISTS v_plip_summary AS
+SELECT
+    p.id                                                        AS pose_id,
+    dr.tool                                                     AS docking_tool,
+    dr.run_label,
+    s.name                                                      AS structure_name,
+    COUNT(*)                                                    AS total_contacts,
+    COUNT(CASE WHEN pc.interaction_type = 'pistacking'   THEN 1 END) AS pistacking,
+    COUNT(CASE WHEN pc.interaction_type = 'hbond'        THEN 1 END) AS hbonds,
+    COUNT(CASE WHEN pc.interaction_type = 'hydrophobic'  THEN 1 END) AS hydrophobic,
+    COUNT(CASE WHEN pc.interaction_type = 'saltbridge'   THEN 1 END) AS saltbridges,
+    COUNT(CASE WHEN pc.interaction_type = 'pication'     THEN 1 END) AS pication,
+    COUNT(CASE WHEN pc.interaction_type = 'waterbridge'  THEN 1 END) AS waterbridges
+FROM plip_contacts pc
+JOIN poses          p   ON p.id  = pc.pose_id
+JOIN docking_runs   dr  ON dr.id = p.run_id
+JOIN structures     s   ON s.id  = dr.structure_id
+GROUP BY pc.pose_id;
+
+
+-- -----------------------------------------------------------------------------
+-- VIEW: v_fg_motif_contacts
+--    Which FG (Phe-Gly) motifs are contacted, and how often across all poses.
+--    Assumes FG residues are PHE or GLY on the ligand chain.
+--    Adjust the WHERE clause to match your actual FG sequence.
+-- -----------------------------------------------------------------------------
+CREATE VIEW IF NOT EXISTS v_fg_motif_contacts AS
+SELECT
+    pc.lig_resname,
+    pc.lig_resid,
+    pc.lig_resid_original,
+    pc.interaction_type,
+    pc.rec_resname,
+    pc.rec_resid_original,
+    dr.tool                 AS docking_tool,
+    COUNT(*)                AS contact_count,
+    COUNT(DISTINCT pc.pose_id) AS pose_count,
+    AVG(pc.distance)        AS avg_distance_angstrom
+FROM plip_contacts pc
+JOIN poses          p   ON p.id  = pc.pose_id
+JOIN docking_runs   dr  ON dr.id = p.run_id
+WHERE pc.lig_resname IN ('PHE', 'GLY', 'FGL')  -- adjust to your FG residues
+GROUP BY pc.lig_resid_original, pc.interaction_type, pc.rec_resid_original, dr.tool
+ORDER BY pose_count DESC;

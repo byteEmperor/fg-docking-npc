@@ -27,6 +27,7 @@ share/python-wheels/
 MANIFEST
 pipeline.db
 .idea/
+.to_mount/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
