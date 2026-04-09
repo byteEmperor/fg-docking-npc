@@ -28,6 +28,7 @@ MANIFEST
 pipeline.db
 .idea/
 .to_mount/
+./pipeline/01_prepare_mounting/batches/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
